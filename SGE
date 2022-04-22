@@ -1,0 +1,415 @@
+from MDS import MDS
+import numpy as np
+from mpl_toolkits.mplot3d import Axes3D
+from sklearn.neighbors import BallTree
+from scipy.sparse.csgraph import floyd_warshall
+from scipy.interpolate import splev, splrep
+
+Axes3D
+def main():    
+    
+    k = 4 # nearest neighbor parameter
+    dim = 2 # embedding dimensionality 
+    h = 100 # number of descritizations in splines
+    per = 10 # mamimum extra length allowed for each spline beyond its geodesics    
+    slam = .3 # smoothing parameter of the spline
+    sigma = .2 # contaminated noise level 
+    
+    X = np.genfromtxt('data_images.csv', delimiter=',')
+    np.savetxt('noisyData.csv', X, fmt='%.18e', delimiter=',', newline='\n') # saving noisy data
+    [n,d] = np.shape(X)
+        
+    X = X + sigma*np.random.randn(n,d)    
+    for j in range(n):
+        ind_ls = [i for i,x in enumerate(X[j,:]) if x < 0]
+        X[j,ind_ls] = np.zeros([1,len(ind_ls)])
+        ind_gr1 = [i for i,x in enumerate(X[j,:]) if x > 1]
+        X[j,ind_gr1] = np.ones([1,len(ind_gr1)])                                
+    
+    ic = isomap_cur()
+    ic.fit(X, k, h, slam, per)
+    Y, eval2 = ic.transform_spl(dim)
+
+        
+    np.savetxt('embedding.csv', Y, fmt='%.18e', delimiter=',', newline='\n')# saving embedding
+   
+         
+class isomap_cur(object):
+     
+
+    def __init__(self): 
+        '''
+        :param k: K nearest neighbor
+        :return: None
+        '''
+        self.mds = MDS()
+        self.d = None
+
+    def nn_search(self, X, k):
+        '''
+        :param X: Data Matrix
+        :param k: Number of neighbors
+        :return: Distance Matrix
+        '''
+        # Use ball tree to keep nearest neighbor search effecient
+        tree = BallTree(X, leaf_size=min(40, 5*k))
+        adj = np.ones([len(X),len(X)])*float('inf')             
+        
+        for i in range(len(X)):
+            dists, inds = tree.query(X[i].reshape(1, -1), k=k+1)                 
+            adj[i,inds] =  dists 
+                              
+        return adj
+
+    def shortest_paths(self, X, adj, h, slam, per):
+        '''
+        :param adj: Adjacency distance matrix including infinity
+        :return: Complete distance matrix (geodesic)
+        '''
+        [d,paths_mat]  = floyd_warshall(adj, directed=False, return_predecessors=True, unweighted=False, overwrite=False)
+        d_spl = np.zeros([len(paths_mat),len(paths_mat)])
+        d_iso = np.zeros([len(paths_mat),len(paths_mat)])
+        dI_cnt = 0        
+        
+        for i in range(0,len(paths_mat)):
+           
+            if i % 10 == 0:
+                    print('%i' %i, end='\t')   
+                    
+            for j in range(i+1,len(paths_mat)):             
+
+                path = []
+                if paths_mat[i,j]==-9999:
+                    d_spl[i,j] = float('inf')
+                    d_iso[i,j] = float('inf')
+                else:
+                    l = j
+                    path = np.array([j])
+                    while paths_mat[i,l]!=i:
+                        path = np.concatenate((path,[paths_mat[i,l]]), axis=0)
+                        l = paths_mat[i,l]
+                    path = np.concatenate((path,[i]), axis=0)
+                    path = path[::-1]
+                    
+                    d_iso[i,j] = self.len_iso(X,path)
+                    d_spl[i,j], dI_flg = self.len_CMspline(X, path, h, slam, d_iso[i,j], per)
+                    dI_cnt = dI_cnt + dI_flg
+                    
+                    
+  # making symetric distance matrices            
+        d_spl = d_spl + d_spl.T
+        d_iso = d_iso + d_iso.T       
+       
+        return d_spl, d_iso, dI_cnt
+
+    def len_CMspline(self, X, path, h, slam, dI, per):
+        '''
+        :param adj: Adjacency distance matrix
+        :r_scaler: Average distance of vertices
+        '''
+        d = len(X.T)
+        s = len(path)*slam
+        sp = np.zeros([h,d])
+        ind = np.linspace(0,len(path)-1,len(path))
+        
+        dI_flg = 0
+        # length of the path = 2     
+        if len(path.T) == 2:
+            for i in range(d):
+                dat = X[path,i]
+    
+                tck = splrep(ind, dat, s=s, k=1)
+                discr = np.linspace(0, len(path)-1, h)
+                in_pl = splev(discr, tck)
+                sp[:,i] = in_pl
+            
+            sp_ln1 = 0 
+            for i in range(h-1):
+                sp_ln1 = sp_ln1 + np.linalg.norm(sp[i+1,:]-sp[i,:])        
+                
+            if sp_ln1 < dI*(100+per)/100:
+                    sp_ln = sp_ln1           
+                        
+            else:# default, geodesic distance
+                sp_ln = dI 
+                dI_flg = 1
+             
+        # length of the path = 3    
+        elif len(path.T) == 3:     
+            
+            for i in range(d):
+                dat = X[path,i]
+    
+                tck = splrep(ind, dat, s=s, k=2)
+                discr = np.linspace(0, len(path)-1, h)
+                in_pl = splev(discr, tck)
+                sp[:,i] = in_pl
+            
+            sp_ln2 = 0 
+            for i in range(h-1):
+                sp_ln2 = sp_ln2 + np.linalg.norm(sp[i+1,:]-sp[i,:])
+                
+            if sp_ln2 < dI*(100+per)/100:
+                sp_ln = sp_ln2
+                
+            else:
+                # test k = 1
+                for i in range(d):
+                    dat = X[path,i]
+        
+                    tck = splrep(ind, dat, s=s, k=1)
+                    discr = np.linspace(0, len(path)-1, h)
+                    in_pl = splev(discr, tck)
+                    sp[:,i] = in_pl
+            
+                sp_ln1 = 0 
+                for i in range(h-1):
+                    sp_ln1 = sp_ln1 + np.linalg.norm(sp[i+1,:]-sp[i,:])
+                    
+                if sp_ln1 < dI*(100+per)/100:
+                    sp_ln = sp_ln1           
+                        
+                else:# default, geodesic distance
+                    sp_ln = dI 
+                    dI_flg = 1
+            
+        # length of the path = 4    
+        elif len(path.T) == 4: 
+            
+            for i in range(d):
+                dat = X[path,i]
+    
+                tck = splrep(ind, dat, s=s, k=3)
+                discr = np.linspace(0, len(path)-1, h)
+                in_pl = splev(discr, tck)
+                sp[:,i] = in_pl
+            
+            sp_ln3 = 0 
+            for i in range(h-1):
+                sp_ln3 = sp_ln3 + np.linalg.norm(sp[i+1,:]-sp[i,:])
+                
+            if sp_ln3 < dI*(100+per)/100:
+                sp_ln = sp_ln3
+                
+            else:
+                # test k = 2
+                for i in range(d):
+                    dat = X[path,i]
+        
+                    tck = splrep(ind, dat, s=s, k=2)
+                    discr = np.linspace(0, len(path)-1, h)
+                    in_pl = splev(discr, tck)
+                    sp[:,i] = in_pl
+                
+                sp_ln2 = 0 
+                for i in range(h-1):
+                    sp_ln2 = sp_ln2 + np.linalg.norm(sp[i+1,:]-sp[i,:])
+                    
+                if sp_ln2 < dI*(100+per)/100:
+                    sp_ln = sp_ln2
+                    
+                else:
+                    # test k = 1
+                    for i in range(d):
+                        dat = X[path,i]
+            
+                        tck = splrep(ind, dat, s=s, k=1)
+                        discr = np.linspace(0, len(path)-1, h)
+                        in_pl = splev(discr, tck)
+                        sp[:,i] = in_pl
+            
+                    sp_ln1 = 0 
+                    for i in range(h-1):
+                        sp_ln1 = sp_ln1 + np.linalg.norm(sp[i+1,:]-sp[i,:])
+                    
+                    if sp_ln1 < dI*(100+per)/100:
+                        sp_ln = sp_ln1
+                        
+                    else:# default, geodesic distance
+                        sp_ln = dI 
+                        dI_flg = 1                  
+                
+         
+        # length of the path = 5 
+        elif len(path.T) == 5:
+            # test k = 3
+            for i in range(d):
+                dat = X[path,i]
+    
+                tck = splrep(ind, dat, s=s, k=3)
+                discr = np.linspace(0, len(path)-1, h)
+                in_pl = splev(discr, tck)
+                sp[:,i] = in_pl
+            
+            sp_ln3 = 0 
+            for i in range(h-1):
+                sp_ln3 = sp_ln3 + np.linalg.norm(sp[i+1,:]-sp[i,:])
+                
+            if sp_ln3 < dI*(100+per)/100:
+                sp_ln = sp_ln3
+                
+            else:
+                # test k = 2
+                for i in range(d):
+                    dat = X[path,i]
+        
+                    tck = splrep(ind, dat, s=s, k=2)
+                    discr = np.linspace(0, len(path)-1, h)
+                    in_pl = splev(discr, tck)
+                    sp[:,i] = in_pl
+                
+                sp_ln2 = 0 
+                for i in range(h-1):
+                    sp_ln2 = sp_ln2 + np.linalg.norm(sp[i+1,:]-sp[i,:])
+                    
+                if sp_ln2 < dI*(100+per)/100:
+                    sp_ln = sp_ln2
+                    
+                else:
+                    # test k = 1
+                    for i in range(d):
+                        dat = X[path,i]
+            
+                        tck = splrep(ind, dat, s=s, k=1)
+                        discr = np.linspace(0, len(path)-1, h)
+                        in_pl = splev(discr, tck)
+                        sp[:,i] = in_pl
+            
+                    sp_ln1 = 0 
+                    for i in range(h-1):
+                        sp_ln1 = sp_ln1 + np.linalg.norm(sp[i+1,:]-sp[i,:])
+                        
+                    if sp_ln1 < dI*(100+per)/100:
+                        sp_ln = sp_ln1
+                        
+                    else:# default, geodesic distance
+                        sp_ln = dI
+                        dI_flg = 1
+                
+            
+        else:   # length of the path > 5    
+            # test k = 3
+            for i in range(d):
+                dat = X[path,i]
+    
+                tck = splrep(ind, dat, s=s, k=3)
+                discr = np.linspace(0, len(path)-1, h)
+                in_pl = splev(discr, tck)
+                sp[:,i] = in_pl
+            
+            sp_ln3 = 0 
+            for i in range(h-1):
+                sp_ln3 = sp_ln3 + np.linalg.norm(sp[i+1,:]-sp[i,:])
+                
+            if sp_ln3 < dI*(100+per)/100:
+                sp_ln = sp_ln3
+                
+            else:
+                # test k = 2
+                for i in range(d):
+                    dat = X[path,i]
+        
+                    tck = splrep(ind, dat, s=s, k=2)
+                    discr = np.linspace(0, len(path)-1, h)
+                    in_pl = splev(discr, tck)
+                    sp[:,i] = in_pl
+            
+                sp_ln2 = 0 
+                for i in range(h-1):
+                    sp_ln2 = sp_ln2 + np.linalg.norm(sp[i+1,:]-sp[i,:])
+                    
+                if sp_ln2 < dI*(100+per)/100:
+                    sp_ln = sp_ln2
+                    
+                else:
+                    # test k = 1
+                    for i in range(d):
+                        dat = X[path,i]
+            
+                        tck = splrep(ind, dat, s=s, k=1)
+                        discr = np.linspace(0, len(path)-1, h)
+                        in_pl = splev(discr, tck)
+                        sp[:,i] = in_pl
+            
+                    sp_ln1 = 0 
+                    for i in range(h-1):
+                        sp_ln1 = sp_ln1 + np.linalg.norm(sp[i+1,:]-sp[i,:])
+                    
+                    if sp_ln1 < dI*(100+per)/100:
+                        sp_ln = sp_ln1
+                        
+                    else:# default, geodesic distance
+                        sp_ln = dI 
+                        dI_flg = 1
+        
+        return sp_ln, dI_flg
+        
+        
+    def len_iso(self,X,path):
+        iso_len = 0
+        for l in range(len(path)-1):
+            iso_len = iso_len + np.linalg.norm(X[path[l],:]-X[path[l+1],:])
+        return iso_len        
+    
+    def divide_group(self, d):
+        '''
+        :param d: Distance matrix
+        :return: groups matrix
+        '''
+        groups = {}
+        for row in d:
+            groups[str(row)] = row
+        
+        return [np.nonzero(row)[0] for row in groups.values()]
+
+    def slice_matrix(self, d, i, j):
+        '''
+        :param d: Distance matrix
+        :return: Sliced matrix        '''
+
+        return np.take(np.take(d, i, 0), j, 1)    
+    
+  
+    def fit(self, X, k, h, slam, per):
+        '''
+        :param D: Data matrix
+        :param k: Number of neighbors
+        :return: None        '''       
+        
+        adj = self.nn_search(X, k)                
+        d_spl, d_iso, dI_cnt = self.shortest_paths(X, adj, h, slam, per)
+        self.dI_cnt = dI_cnt
+        
+        tmp_d_iso = np.isfinite(d_iso)
+        groups_iso = self.divide_group(tmp_d_iso)               
+        groups_iso.sort(key=lambda x: len(x), reverse=True)              
+        
+        # Just use the group with the highest number of points
+        self.d_iso = self.slice_matrix(d_iso, groups_iso[0], groups_iso[0])        
+        
+        tmp_d_spl = np.isfinite(d_spl)
+        groups_spl = self.divide_group(tmp_d_spl)        
+        groups_spl.sort(key=lambda x: len(x), reverse=True)
+             
+        # Just use the group with the highest number of points
+        self.d_spl = self.slice_matrix(d_spl, groups_iso[0], groups_iso[0])       
+ 
+        grp_ind = groups_iso[0]
+        print('\nSubgraphs: %i; size of largest: %i'%(len(groups_iso),len(groups_iso[0])))
+        self.grp_ind = grp_ind          
+                    
+    def grp_info(self):
+        return self.grp_ind
+        
+    def dI_info(self):
+        return self.dI_cnt
+        
+    def transform_iso(self, dim):
+        self.mds.fit(self.d_iso)
+        return self.mds.transform(dim)
+        
+    def transform_spl(self, dim):
+        self.mds.fit(self.d_spl)
+        return self.mds.transform(dim) 
+        
+main()
